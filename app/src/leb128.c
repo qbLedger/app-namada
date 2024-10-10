@@ -1,5 +1,5 @@
 /** ******************************************************************************
- *  (c) 2018 - 2022 Zondax AG
+ *  (c) 2018 - 2024 Zondax AG
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -53,7 +53,6 @@ zxerr_t decodeLEB128(const uint8_t *input, uint16_t inputSize, uint8_t *consumed
         if (!(input[i] & 0x80u)) {
             *consumed = i + 1;
             return zxerr_ok;
-            // return i + 1;
         }
 
         shift += 7;

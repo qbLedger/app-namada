@@ -1,5 +1,5 @@
 #*******************************************************************************
-#*   (c) 2018 -2022 Zondax AG
+#*   (c) 2018 -2024 Zondax AG
 #*
 #*  Licensed under the Apache License, Version 2.0 (the "License");
 #*  you may not use this file except in compliance with the License.
@@ -14,11 +14,21 @@
 #*  limitations under the License.
 #********************************************************************************
 cmake_minimum_required(VERSION 3.0)
+include("cmake/HunterGate.cmake")
+HunterGate(
+    URL "https://github.com/cpp-pm/hunter/archive/v0.25.5.tar.gz"
+    SHA1 "a20151e4c0740ee7d0f9994476856d813cdead29"
+    LOCAL
+)
+
 project(ledger-namada VERSION 0.0.0)
 enable_testing()
 
 cmake_policy(SET CMP0025 NEW)
 set(CMAKE_CXX_STANDARD 11)
+
+set(HUNTER_STATUS_DEBUG ON)
+set(HUNTER_TLS_VERIFY OFF)
 
 option(ENABLE_FUZZING "Build with fuzzing instrumentation and build fuzz targets" OFF)
 option(ENABLE_COVERAGE "Build with source code coverage instrumentation" OFF)
@@ -30,6 +40,13 @@ string(APPEND CMAKE_LINKER_FLAGS " -fno-omit-frame-pointer -g")
 
 add_definitions(-DAPP_STANDARD)
 add_definitions(-DSUBSTRATE_PARSER_FULL)
+
+hunter_add_package(fmt)
+find_package(fmt CONFIG REQUIRED)
+hunter_add_package(jsoncpp)
+find_package(jsoncpp CONFIG REQUIRED)
+hunter_add_package(GTest)
+find_package(GTest CONFIG REQUIRED)
 
 if(ENABLE_FUZZING)
     add_definitions(-DFUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION=1)
@@ -71,9 +88,6 @@ if(ENABLE_SANITIZERS)
     string(APPEND CMAKE_CXX_FLAGS " -fsanitize=address,undefined -fsanitize-recover=address,undefined")
     string(APPEND CMAKE_LINKER_FLAGS " -fsanitize=address,undefined -fsanitize-recover=address,undefined")
 endif()
-
-include(cmake/conan/CMakeLists.txt)
-add_subdirectory(cmake/gtest)
 
 set (RETRIEVE_MAJOR_CMD
         "cat ${CMAKE_CURRENT_SOURCE_DIR}/app/Makefile.version | grep APPVERSION_M | cut -b 14- | tr -d '\n'"
@@ -122,8 +136,15 @@ file(GLOB_RECURSE LIB_SRC
         ${CMAKE_CURRENT_SOURCE_DIR}/app/src/parser_impl.c
         ${CMAKE_CURRENT_SOURCE_DIR}/app/src/parser_impl_common.c
         ${CMAKE_CURRENT_SOURCE_DIR}/app/src/parser_impl_txn.c
+        ${CMAKE_CURRENT_SOURCE_DIR}/app/src/parser_impl_masp.c
+        ${CMAKE_CURRENT_SOURCE_DIR}/app/src/bech32_encoding.c
+        ${CMAKE_CURRENT_SOURCE_DIR}/app/src/parser_address.c
         ${CMAKE_CURRENT_SOURCE_DIR}/app/src/crypto_helper.c
         ${CMAKE_CURRENT_SOURCE_DIR}/app/src/leb128.c
+        ${CMAKE_CURRENT_SOURCE_DIR}/app/src/txn_validator.c
+        ${CMAKE_CURRENT_SOURCE_DIR}/app/src/txn_delegation.c
+        ${CMAKE_CURRENT_SOURCE_DIR}/deps/blake2/ref/blake2b-ref.c
+        ${CMAKE_CURRENT_SOURCE_DIR}/app/src/blake2s/blake2s-ref.c
         )
 
 add_library(app_lib STATIC ${LIB_SRC})
@@ -134,9 +155,63 @@ target_include_directories(app_lib PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/app/src/lib
         ${CMAKE_CURRENT_SOURCE_DIR}/app/src/common
         ${CMAKE_CURRENT_SOURCE_DIR}/deps/picohash/
+       ###
+        ${CMAKE_CURRENT_SOURCE_DIR}/app/rust/include
+        ###
+        ${CMAKE_CURRENT_SOURCE_DIR}/deps/blake2/ref
         )
 
 ##############################################################
+##############################################################
+## Rust library for CPP tests
+set(RUST_LIB_DIR "${CMAKE_CURRENT_SOURCE_DIR}/app/rust")
+
+# Determine the Rust target triple based on the host system
+if(CMAKE_HOST_SYSTEM_NAME STREQUAL "Linux")
+    if(CMAKE_HOST_SYSTEM_PROCESSOR MATCHES "aarch64")
+        set(RUST_TARGET_TRIPLE "aarch64-unknown-linux-gnu")
+    elseif(CMAKE_HOST_SYSTEM_PROCESSOR MATCHES "x86_64")
+        set(RUST_TARGET_TRIPLE "x86_64-unknown-linux-gnu")
+    else()
+        message(FATAL_ERROR "Unsupported processor: ${CMAKE_HOST_SYSTEM_PROCESSOR}")
+    endif()
+elseif(CMAKE_HOST_SYSTEM_NAME STREQUAL "Darwin")
+    if(CMAKE_HOST_SYSTEM_PROCESSOR MATCHES "arm64")
+        set(RUST_TARGET_TRIPLE "aarch64-apple-darwin")
+    elseif(CMAKE_HOST_SYSTEM_PROCESSOR MATCHES "x86_64")
+        set(RUST_TARGET_TRIPLE "x86_64-apple-darwin")
+    else()
+        message(FATAL_ERROR "Unsupported processor: ${CMAKE_HOST_SYSTEM_PROCESSOR}")
+    endif()
+else()
+    message(FATAL_ERROR "Unsupported host system: ${CMAKE_HOST_SYSTEM_NAME}")
+endif()
+
+# Use debug mode for debugging tests
+set(RUST_TARGET_DIR "${RUST_LIB_DIR}/target/${RUST_TARGET_TRIPLE}/debug")
+
+# Custom target for the Rust library
+add_custom_target(RustLibClean
+    COMMAND cargo clean
+    WORKING_DIRECTORY ${RUST_LIB_DIR}
+)
+add_custom_target(RustLibBuild
+    COMMAND cargo build --target ${RUST_TARGET_TRIPLE} --features cpp_tests
+    WORKING_DIRECTORY ${RUST_LIB_DIR}
+    DEPENDS RustLibClean
+)
+
+# Assuming the Rust library outputs a file named librslib.a
+set(RUST_LIB "${RUST_TARGET_DIR}/librslib.a")
+
+# Ensure the Rust library is built before the C++ project
+add_library(rslib STATIC IMPORTED)
+set_property(TARGET rslib PROPERTY IMPORTED_LOCATION ${RUST_LIB})
+add_dependencies(rslib RustLibBuild)
+
+# Ensure your C++ targets depend on the Rust library being built first
+# For example, for your app_lib static library:
+add_dependencies(app_lib rslib)
 ##############################################################
 #  Tests
 file(GLOB_RECURSE TESTS_SRC
@@ -144,22 +219,22 @@ file(GLOB_RECURSE TESTS_SRC
 
 add_executable(unittests ${TESTS_SRC})
 target_include_directories(unittests PRIVATE
-        ${gtest_SOURCE_DIR}/include
-        ${gmock_SOURCE_DIR}/include
-        ${CONAN_INCLUDE_DIRS_FMT}
-        ${CONAN_INCLUDE_DIRS_JSONCPP}
         ${CMAKE_CURRENT_SOURCE_DIR}/app/src
         ${CMAKE_CURRENT_SOURCE_DIR}/app/src/lib
+        ###
+        ${CMAKE_CURRENT_SOURCE_DIR}/deps/blake2/ref
         )
 
 target_link_libraries(unittests PRIVATE
-        gtest_main
+        GTest::gtest_main
         app_lib
-        CONAN_PKG::fmt
-        CONAN_PKG::jsoncpp)
+        rslib
+        fmt::fmt
+        JsonCpp::JsonCpp)
 
 add_compile_definitions(TESTVECTORS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/")
-add_test(unittests ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/unittests)
+add_compile_definitions(COMPILE_MASP=1)
+add_test(NAME unittests COMMAND unittests)
 set_tests_properties(unittests PROPERTIES WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/tests)
 
 ##############################################################
